@@ -6,7 +6,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {DoubleEndedQueue} from "@openzeppelin/contracts/utils/structs/DoubleEndedQueue.sol";
 
-import "hardhat/console.sol";
+// import "hardhat/console.sol";
 
 contract Athena is AccessControl {
     using SafeERC20 for IERC20Metadata;
@@ -50,9 +50,9 @@ contract Athena is AccessControl {
     error DepositExists(address user, uint256 package);
     error InsufficientAmountClaimable(uint256 timeElapsed);
 
-    constructor(address defaultAdmin, address kycAdmin, IERC20Metadata usdt) {
-        _grantRole(DEFAULT_ADMIN_ROLE, defaultAdmin);
-        _grantRole(KYC_ROLE, kycAdmin);
+    constructor(IERC20Metadata usdt) {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(KYC_ROLE, msg.sender);
         USDT = usdt;
         usdtDecimals = USDT.decimals();
 
