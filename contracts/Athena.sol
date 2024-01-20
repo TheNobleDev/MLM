@@ -2,21 +2,19 @@
 pragma solidity ^0.8.20;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {DoubleEndedQueue} from "@openzeppelin/contracts/utils/structs/DoubleEndedQueue.sol";
 
 // import "hardhat/console.sol";
 
-contract Athena is AccessControl {
+contract Athena is Ownable {
     using SafeERC20 for IERC20Metadata;
     using DoubleEndedQueue for DoubleEndedQueue.Bytes32Deque;
 
     uint256 public constant MAX_SPAN = 3;
     uint256 public constant MAX_LEVEL = 5;
     uint256 public constant CLAIM_EPOCH = 30 days;
-
-    bytes32 public constant KYC_ROLE = keccak256("KYC_ROLE");
 
     IERC20Metadata public immutable USDT;
     uint8 private immutable usdtDecimals;
@@ -25,7 +23,7 @@ contract Athena is AccessControl {
         uint256 totalPayout;
         uint256 referralCount;
         uint256 pendingPayout;
-        uint256 claimedUpto;
+        uint256 lastClaimTimestamp;
     }
 
     struct User {
@@ -36,7 +34,7 @@ contract Athena is AccessControl {
         address[] directs;
     }
 
-    mapping(address => bool) public isKYCApproved;
+    mapping(address => bool) public hasRegistered;
     mapping(address => User) public userInfo;
     mapping(address => Earnings) public userEarnings;
 
@@ -46,18 +44,17 @@ contract Athena is AccessControl {
     event LevelUp(address user, uint256 newLevel);
 
     error InvalidPackage(uint256 package);
-    error InvalidKYCStatus(address user, bool status);
+    error RegistrationExists(address user);
+    error DepositDoesNotExist(address user);
     error DepositExists(address user, uint256 package);
     error InsufficientAmountClaimable(uint256 timeElapsed);
 
-    constructor(IERC20Metadata usdt) {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(KYC_ROLE, msg.sender);
+    constructor(IERC20Metadata usdt) Ownable(msg.sender) {
         USDT = usdt;
         usdtDecimals = USDT.decimals();
 
-        // set KYC of 0x00 to true
-        isKYCApproved[address(0)] = true;
+        // TODO
+        // Contract is bricked upon deployment, as no registered user
     }
 
     function getAmountForPackage(uint256 package) public view returns(uint256) {
@@ -93,7 +90,7 @@ contract Athena is AccessControl {
             revert InvalidPackage(package);
         }
     }
-    
+
     function getAmountForReferrer(uint256 package) public view returns(uint256) {
         if (package == 1) {
             return 5 * getAmountForPackage(package) / 100;
@@ -110,18 +107,29 @@ contract Athena is AccessControl {
         }
     }
 
-    function approveKYC(address user, address referrer) external onlyRole(KYC_ROLE) {
-        // ensure user is not already approved
-        if(isKYCApproved[user]) {
-            revert InvalidKYCStatus(user, true);
+    function getUserDirects(address user) external view returns(address[] memory) {
+        return userInfo[user].directs;
+    }
+
+    function hasDeposited(address user) public view returns(bool) {
+        return userInfo[user].package != 0;
+    }
+
+    function register(address referrer) external {
+        address user = msg.sender;
+
+        // ensure user is not already registered
+        if(hasRegistered[user]) {
+            revert RegistrationExists(user);
         }
-        // ensure referrer is approved
-        if(!isKYCApproved[referrer]) {
-            revert InvalidKYCStatus(referrer, false);
+
+        // ensure referrer is deposited
+        if(!hasDeposited(referrer)) {
+            revert DepositDoesNotExist(referrer);
         }
-        // set to approved
-        isKYCApproved[user] = true;
-        
+        // set to registered
+        hasRegistered[user] = true;
+
         // set referrer
         User memory u;
         u.referrer = referrer;
@@ -135,9 +143,9 @@ contract Athena is AccessControl {
     }
 
     function deposit(uint256 package) external {
-        // check kyc approved
-        if(!isKYCApproved[msg.sender]) {
-            revert InvalidKYCStatus(msg.sender, false);
+        // check registration
+        if(!hasRegistered[msg.sender]) {
+            revert RegistrationExists(msg.sender);
         }
 
         // transfer-in usdt
@@ -145,7 +153,7 @@ contract Athena is AccessControl {
         USDT.safeTransferFrom(address(msg.sender), address(this), amount);
 
         User storage user = userInfo[msg.sender];
-        
+
         // check not already deposited
         if(user.package != 0) {
             revert DepositExists(msg.sender, user.package);
@@ -157,7 +165,7 @@ contract Athena is AccessControl {
 
         // set user struct details
         user.package = package;
-        userEarnings[msg.sender].claimedUpto = block.timestamp;
+        userEarnings[msg.sender].lastClaimTimestamp = block.timestamp;
 
         // add user connections
         _addConnections(msg.sender, user.referrer);
@@ -168,14 +176,14 @@ contract Athena is AccessControl {
         User memory user = userInfo[msg.sender];
 
         // check 1 epoch has passed
-        uint256 timeElapsed = block.timestamp - earnings.claimedUpto;
+        uint256 timeElapsed = block.timestamp - earnings.lastClaimTimestamp;
         if(timeElapsed < CLAIM_EPOCH && earnings.pendingPayout == 0) {
             revert InsufficientAmountClaimable(timeElapsed);
         }
         // update last claim timestamp
         uint256 epochsElapsed = timeElapsed/CLAIM_EPOCH;
         uint256 payout = earnings.pendingPayout + epochsElapsed * getAmountForMonthlyROI(user.package, user.level);
-        earnings.claimedUpto += epochsElapsed * CLAIM_EPOCH;
+        earnings.lastClaimTimestamp += epochsElapsed * CLAIM_EPOCH;
 
         // update state variables
         earnings.pendingPayout = 0;
@@ -235,11 +243,11 @@ contract Athena is AccessControl {
         }
     }
 
-    function _toBytes32(address a) public pure returns (bytes32) {
+    function _toBytes32(address a) internal pure returns (bytes32) {
         return bytes32(uint256(uint160(a)));
     }
 
-    function _toAddress(bytes32 a) public pure returns (address) {
+    function _toAddress(bytes32 a) internal pure returns (address) {
         return address(uint160(uint256(a)));
     }
 }
